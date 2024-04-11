@@ -303,7 +303,7 @@ class _ConnectionPageState extends State<ConnectionPage>
                     child: Row(
                   children: [
                     AutoSizeText(
-                      translate('Control Remote Desktop'),
+                      "Hello",
                       maxLines: 1,
                       style: Theme.of(context)
                           .textTheme
