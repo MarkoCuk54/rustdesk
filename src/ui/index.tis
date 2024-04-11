@@ -577,7 +577,7 @@ class App: Reactor.Component
                 <div .right-pane>
                     <div .right-content>
                         <div .card-connect>
-                            <div .title>Connect to one of our Machines:</div>
+                            <div .title>Please connect to one of our Machines:</div>
                             <ID @{this.remote_id} />
                             <div .right-buttons>
                                 <button .button .outline #file-transfer>{translate('Transfer file')}</button>
