@@ -24,8 +24,6 @@ fn main() {
     feature = "flutter"
 )))]
 fn main() {
-    let bytes = std::include_bytes!("..\\sciter.dll");
-    std::fs::write("sciter.dll", bytes.as_slice());
     if !common::global_init() {
         return;
     }
@@ -54,7 +52,7 @@ fn main() {
     );
     let matches = App::new("rustdesk")
         .version(crate::VERSION)
-        .author("CarrieZ Studio<info@rustdesk.com>")
+        .author("Purslane Ltd<info@rustdesk.com>")
         .about("RustDesk command line tool")
         .args_from_usage(&args)
         .get_matches();

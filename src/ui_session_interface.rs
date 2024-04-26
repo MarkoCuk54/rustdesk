@@ -2,6 +2,7 @@ use crate::{
     common::{get_supported_keyboard_modes, is_keyboard_mode_supported},
     input::{MOUSE_BUTTON_LEFT, MOUSE_TYPE_DOWN, MOUSE_TYPE_UP, MOUSE_TYPE_WHEEL},
 };
+use async_trait::async_trait;
 use bytes::Bytes;
 use rdev::{Event, EventType::*, KeyCode};
 use std::{
@@ -189,6 +190,11 @@ impl<T: InvokeUiSession> Session<T> {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn is_rdp(&self) -> bool {
         self.lc.read().unwrap().conn_type.eq(&ConnType::RDP)
+    }
+
+    #[cfg(feature = "flutter")]
+    pub fn is_multi_ui_session(&self) -> bool {
+        self.ui_handler.is_multi_ui_session()
     }
 
     pub fn get_view_style(&self) -> String {
@@ -1221,23 +1227,32 @@ impl<T: InvokeUiSession> Session<T> {
     pub fn change_resolution(&self, display: i32, width: i32, height: i32) {
         *self.last_change_display.lock().unwrap() =
             ChangeDisplayRecord::new(display, width, height);
-        self.do_change_resolution(width, height);
+        self.do_change_resolution(display, width, height);
     }
 
     #[inline]
     fn try_change_init_resolution(&self, display: i32) {
         if let Some((w, h)) = self.lc.read().unwrap().get_custom_resolution(display) {
-            self.do_change_resolution(w, h);
+            self.change_resolution(display, w, h);
         }
     }
 
-    fn do_change_resolution(&self, width: i32, height: i32) {
+    fn do_change_resolution(&self, display: i32, width: i32, height: i32) {
         let mut misc = Misc::new();
-        misc.set_change_resolution(Resolution {
+        let resolution = Resolution {
             width,
             height,
             ..Default::default()
-        });
+        };
+        if crate::common::is_support_multi_ui_session_num(self.lc.read().unwrap().version) {
+            misc.set_change_display_resolution(DisplayResolution {
+                display,
+                resolution: Some(resolution).into(),
+                ..Default::default()
+            });
+        } else {
+            misc.set_change_resolution(resolution);
+        }
         let mut msg = Message::new();
         msg.set_misc(misc);
         self.send(Data::Message(msg));
@@ -1291,6 +1306,22 @@ impl<T: InvokeUiSession> Session<T> {
         } else {
             log::error!("selected invalid sid: {}", sid);
         }
+    }
+
+    #[inline]
+    pub fn request_init_msgs(&self, display: usize) {
+        self.send_message_query(display);
+    }
+
+    fn send_message_query(&self, display: usize) {
+        let mut misc = Misc::new();
+        misc.set_message_query(MessageQuery {
+            switch_display: display as _,
+            ..Default::default()
+        });
+        let mut msg = Message::new();
+        msg.set_misc(misc);
+        self.send(Data::Message(msg));
     }
 }
 
@@ -1349,9 +1380,12 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn on_voice_call_incoming(&self);
     fn get_rgba(&self, display: usize) -> *const u8;
     fn next_rgba(&self, display: usize);
-    #[cfg(all(feature = "gpucodec", feature = "flutter"))]
+    #[cfg(all(feature = "vram", feature = "flutter"))]
     fn on_texture(&self, display: usize, texture: *mut c_void);
     fn set_multiple_windows_session(&self, sessions: Vec<WindowsSession>);
+    fn set_current_display(&self, disp_idx: i32);
+    #[cfg(feature = "flutter")]
+    fn is_multi_ui_session(&self) -> bool;
 }
 
 impl<T: InvokeUiSession> Deref for Session<T> {
@@ -1370,6 +1404,7 @@ impl<T: InvokeUiSession> DerefMut for Session<T> {
 
 impl<T: InvokeUiSession> FileManager for Session<T> {}
 
+#[async_trait]
 impl<T: InvokeUiSession> Interface for Session<T> {
     fn get_lch(&self) -> Arc<RwLock<LoginConfigHandler>> {
         return self.lc.clone();
@@ -1661,7 +1696,7 @@ pub async fn io_loop<T: InvokeUiSession>(handler: Session<T>, round: u32) {
                 if pixelbuffer {
                     ui_handler.on_rgba(display, data);
                 } else {
-                    #[cfg(all(feature = "gpucodec", feature = "flutter"))]
+                    #[cfg(all(feature = "vram", feature = "flutter"))]
                     ui_handler.on_texture(display, _texture);
                 }
             },

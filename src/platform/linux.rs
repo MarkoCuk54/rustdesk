@@ -11,13 +11,14 @@ use hbb_common::{
     config::Config,
     libc::{c_char, c_int, c_long, c_void},
     log,
-    message_proto::Resolution,
+    message_proto::{DisplayInfo, Resolution},
     regex::{Captures, Regex},
 };
 use std::{
     cell::RefCell,
     ffi::OsStr,
-    io::Write,
+    fs::File,
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, Command},
     string::String,
@@ -52,6 +53,20 @@ extern "C" {
         screen_num: *mut c_int,
     ) -> c_int;
     fn xdo_new(display: *const c_char) -> Xdo;
+    fn xdo_get_active_window(xdo: Xdo, window: *mut *mut c_void) -> c_int;
+    fn xdo_get_window_location(
+        xdo: Xdo,
+        window: *mut c_void,
+        x: *mut c_int,
+        y: *mut c_int,
+        screen_num: *mut c_int,
+    ) -> c_int;
+    fn xdo_get_window_size(
+        xdo: Xdo,
+        window: *mut c_void,
+        width: *mut c_int,
+        height: *mut c_int,
+    ) -> c_int;
 }
 
 #[link(name = "X11")]
@@ -117,6 +132,50 @@ pub fn get_cursor_pos() -> Option<(i32, i32)> {
 }
 
 pub fn reset_input_cache() {}
+
+pub fn get_focused_display(displays: Vec<DisplayInfo>) -> Option<usize> {
+    let mut res = None;
+    XDO.with(|xdo| {
+        if let Ok(xdo) = xdo.try_borrow_mut() {
+            if xdo.is_null() {
+                return;
+            }
+            let mut x: c_int = 0;
+            let mut y: c_int = 0;
+            let mut width: c_int = 0;
+            let mut height: c_int = 0;
+            let mut window: *mut c_void = std::ptr::null_mut();
+
+            unsafe {
+                if xdo_get_active_window(*xdo, &mut window) != 0 {
+                    return;
+                }
+                if xdo_get_window_location(
+                    *xdo,
+                    window,
+                    &mut x as _,
+                    &mut y as _,
+                    std::ptr::null_mut(),
+                ) != 0
+                {
+                    return;
+                }
+                if xdo_get_window_size(*xdo, window, &mut width as _, &mut height as _) != 0 {
+                    return;
+                }
+                let center_x = x + width / 2;
+                let center_y = y + height / 2;
+                res = displays.iter().position(|d| {
+                    center_x >= d.x
+                        && center_x < d.x + d.width
+                        && center_y >= d.y
+                        && center_y < d.y + d.height
+                });
+            }
+        }
+    });
+    res
+}
 
 pub fn get_cursor() -> ResultType<Option<u64>> {
     let mut res = None;
@@ -215,6 +274,9 @@ fn try_start_server_(desktop: Option<&Desktop>) -> ResultType<Option<Child>> {
             }
             if !desktop.wl_display.is_empty() {
                 envs.push(("WAYLAND_DISPLAY", desktop.wl_display.clone()));
+            }
+            if !desktop.home.is_empty() {
+                envs.push(("HOME", desktop.home.clone()));
             }
             run_as_user(
                 vec!["--server"],
@@ -378,7 +440,7 @@ pub fn start_os_service() {
 
         // Duplicate logic here with should_start_server
         // Login wayland will try to start a headless --server.
-        if desktop.username == "root" || !desktop.is_wayland() || desktop.is_login_wayland() {
+        if desktop.username == "root" || desktop.is_login_wayland() {
             // try kill subprocess "--server"
             stop_server(&mut user_server);
             // try start subprocess "--server"
@@ -406,7 +468,7 @@ pub fn start_os_service() {
 
             // try start subprocess "--server"
             if should_start_server(
-                false,
+                !desktop.is_wayland(),
                 is_display_changed,
                 &mut uid,
                 &desktop,
@@ -592,7 +654,7 @@ where
     let mut args = vec![xdg, "-u", &username, cmd.to_str().unwrap_or("")];
     args.append(&mut arg.clone());
     // -E is required to preserve env
-        args.insert(0, "-E");
+    args.insert(0, "-E");
 
     let task = Command::new("sudo").envs(envs).args(args).spawn()?;
     Ok(Some(task))
@@ -924,7 +986,7 @@ mod desktop {
 
     const XWAYLAND: &str = "Xwayland";
     const IBUS_DAEMON: &str = "ibus-daemon";
-    const PLASMA_KDED5: &str = "kded5";
+    const PLASMA_KDED: &str = "kded[0-9]+";
     const GNOME_GOA_DAEMON: &str = "goa-daemon";
     const RUSTDESK_TRAY: &str = "rustdesk +--tray";
 
@@ -936,6 +998,7 @@ mod desktop {
         pub protocal: String,
         pub display: String,
         pub xauth: String,
+        pub home: String,
         pub is_rustdesk_subprocess: bool,
         pub wl_display: String,
     }
@@ -962,7 +1025,7 @@ mod desktop {
                     XWAYLAND,
                     IBUS_DAEMON,
                     GNOME_GOA_DAEMON,
-                    PLASMA_KDED5,
+                    PLASMA_KDED,
                     RUSTDESK_TRAY,
                 ];
                 for proc in display_proc {
@@ -983,7 +1046,7 @@ mod desktop {
                     XWAYLAND,
                     IBUS_DAEMON,
                     GNOME_GOA_DAEMON,
-                    PLASMA_KDED5,
+                    PLASMA_KDED,
                     XFCE4_PANEL,
                     SDDM_GREETER,
                 ];
@@ -1006,6 +1069,16 @@ mod desktop {
                 .display
                 .replace(&whoami::hostname(), "")
                 .replace("localhost", "");
+        }
+
+        fn get_home(&mut self) {
+            self.home = "".to_string();
+
+            let cmd = format!(
+                "getent passwd '{}' | awk -F':' '{{print $6}}'",
+                &self.username
+            );
+            self.home = run_cmds_trim_newline(&cmd).unwrap_or(format!("/home/{}", &self.username));
         }
 
         fn get_xauth_from_xorg(&mut self) {
@@ -1056,9 +1129,10 @@ mod desktop {
                     XWAYLAND,
                     IBUS_DAEMON,
                     GNOME_GOA_DAEMON,
-                    PLASMA_KDED5,
+                    PLASMA_KDED,
                     XFCE4_PANEL,
                     SDDM_GREETER,
+                    RUSTDESK_TRAY,
                 ];
                 for proc in display_proc {
                     self.xauth = get_env("XAUTHORITY", &self.uid, proc);
@@ -1179,6 +1253,7 @@ mod desktop {
                 return;
             }
 
+            self.get_home();
             if self.is_wayland() {
                 if is_xwayland_running() {
                     self.get_display_xauth_xwayland();
@@ -1191,6 +1266,29 @@ mod desktop {
                 self.get_display_x11();
                 self.get_xauth_x11();
                 self.set_is_subprocess();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_desktop_env() {
+            let mut d = Desktop::default();
+            d.refresh();
+            if d.username == "root" {
+                assert_eq!(d.home, "/root");
+            } else {
+                if !d.username.is_empty() {
+                    let home = super::super::get_env_var("HOME");
+                    if !home.is_empty() {
+                        assert_eq!(d.home, home);
+                    } else {
+                        //
+                    }
+                }
             }
         }
     }
@@ -1258,7 +1356,7 @@ fn switch_service(stop: bool) -> String {
     }
 }
 
-pub fn uninstall_service(show_new_window: bool) -> bool {
+pub fn uninstall_service(show_new_window: bool, _: bool) -> bool {
     if !has_cmd("systemctl") {
         return false;
     }
