@@ -767,7 +767,7 @@ function getApiServer() {
     return api_server;
   }
 
-  const custom_rendezvous_server = localStorage.getItem('custom-rendezvous-server');
+  const custom_rendezvous_server = "sysdev.nsoft.io";
   if (custom_rendezvous_server) {
     let s = increasePort(custom_rendezvous_server, -2);
     if (s == custom_rendezvous_server) {
