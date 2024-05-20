@@ -788,7 +788,7 @@ class RustdeskImpl {
     throw UnimplementedError();
   }
 
-  Future<String?> mainGetHttpStatus({required String url, dynamic hint}){
+  Future<String?> mainGetHttpStatus({required String url, dynamic hint}) {
     throw UnimplementedError();
   }
 
